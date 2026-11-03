@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "douyin-group-friend"
+version = "0.1.0"
+description = "DeepSeek group friend core and Windows UI diagnostics"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+group-friend = "group_friend.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["group_friend*"]

@@ -1,0 +1,13 @@
+.env
+config.local.json
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
+state/
+diagnostics/
+*.sqlite*
+.pytest_cache/
+*.egg-info/
+build/
+dist/

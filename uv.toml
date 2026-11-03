@@ -1,0 +1,2 @@
+# Keep project cache writable in the local development workspace.
+cache-dir = ".uv-cache"
