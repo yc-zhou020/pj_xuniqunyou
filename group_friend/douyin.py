@@ -103,6 +103,9 @@ Images/cards are skipped instead of interpreting their author labels as text.
         raise ObservationError("duplicate_node_paths")
     if by_path.get("root", {}).get("Name") != expected_title:
         raise ObservationError("window_title_changed")
+    private = private_chat_layout(nodes, expected_heading)
+    if private is not None:
+        return parse_private_texts(nodes, private[0])
     if sum(n.get("Name") == expected_heading for n in nodes) != 1:
         raise ObservationError("group_heading_changed")
     # Locate composer structurally: an activatable grouping with a unique
@@ -161,6 +164,86 @@ Images/cards are skipped instead of interpreting their author labels as text.
         if text.strip():
             texts.append(ObservedText(text, inherited_name, not bool(explicit), path))
     return texts
+
+
+def private_chat_layout(nodes, expected_heading):
+    """Measured inline private pane: validate its header, never the contact list."""
+    by_path = {n['Path']: n for n in nodes}
+    candidates = []
+    for node in nodes:
+        if node.get('Role') != 20 or node.get('DefaultAction') != '激活':
+            continue
+        parts = node['Path'].split('/')
+        if len(parts) < 7:
+            continue
+        main = '/'.join(parts[:-3])
+        if node['Path'] not in (main + '/2/1/0', main + '/3/1/0'):
+            continue
+        pane = '/'.join(parts[:-6])
+        if main != pane + '/1/0/0':
+            continue
+        headers = [n for n in nodes if n['Path'].startswith(pane + '/0/')
+                   and n.get('Role') == 41 and n.get('Name') == expected_heading]
+        if (len(headers) == 1
+                and main + '/0' in by_path):
+            candidates.append((main + '/0', node['Path']))
+    if len(candidates) > 1:
+        raise ObservationError('private_chat_not_unique')
+    return candidates[0] if candidates else None
+
+
+PRIVATE_TIME_LABEL = r'(?:刚刚|前天|昨天(?: \d{1,2}:\d{2})?|\d+分钟前|\d+小时前|\d{1,2}:\d{2}|\d{1,2}[月/]\d{1,2}日?)'
+
+
+def private_message_base(nodes, base):
+    """Unwrap the measured scroll container, without unwrapping a text bubble."""
+    children = [n for n in nodes if n['Path'].startswith(base + '/')
+                and n['Path'].count('/') == base.count('/') + 1]
+    if len(children) != 1 or children[0].get('Role') != 20:
+        return base
+    wrapper = children[0]
+    outer = next(n for n in nodes if n['Path'] == base)
+    if outer.get('Bounds') is not None and wrapper.get('Bounds') != outer['Bounds']:
+        return base
+    # A sole message row can also have grouping descendants. Require the
+    # observed list structure: direct timestamp separators beside message rows.
+    timeline = [n for n in nodes if n['Path'].startswith(wrapper['Path'] + '/')
+                and n['Path'].count('/') == wrapper['Path'].count('/') + 1]
+    if (any(n.get('Role') == 41 and re.fullmatch(PRIVATE_TIME_LABEL, n.get('Name') or '') for n in timeline)
+            and any(n.get('Role') == 20 for n in timeline)):
+        return wrapper['Path']
+    return base
+
+
+def parse_private_texts(nodes, base):
+    """Extract private text bubbles; identity/direction remain unknown.
+
+    The screenshot-verified layout has an avatar branch followed by body /1,
+    or a continuation body /0. Bare static system notices are excluded.
+    """
+    base = private_message_base(nodes, base)
+    by_path = {n['Path']: n for n in nodes}
+    rows = [n for n in nodes if n['Path'].startswith(base + '/')
+            and n['Path'].count('/') == base.count('/') + 1 and n.get('Role') == 20]
+    try:
+        rows.sort(key=lambda n: int(n['Path'].rsplit('/', 1)[1]), reverse=True)
+    except ValueError:
+        raise ObservationError('row_layout_unverified') from None
+    messages = []
+    for row in rows:
+        path = row['Path']
+        avatar = any(n['Path'].startswith(path + '/0/') and n.get('Role') == 40 for n in nodes)
+        body = path + ('/1' if avatar else '/0')
+        # Notices such as friendship state have a direct static child.
+        if by_path.get(body, {}).get('Role') != 20:
+            continue
+        descendants = [n for n in nodes if n['Path'] == body or n['Path'].startswith(body + '/')]
+        if any(n.get('Role') in (30, 40, 43, 59) for n in descendants):
+            continue
+        text = ''.join(n.get('Name') or '' for n in descendants if n.get('Role') == 41).replace('\u200b', '')
+        if text.strip():
+            messages.append(ObservedText(text, None, False, path))
+    return messages
 
 
 class WindowsObserver:

@@ -1,18 +1,18 @@
 """Generate -> review/edit -> approve exact version -> explicitly send once."""
 import argparse
-import json
 import hashlib
 import sqlite3
 import sys
 from pathlib import Path
 
 from .config import Config, load_env
-from .douyin import Binding, ObservationError, parse_window, select_window
+from .douyin import Binding, ObservationError
 from .douyin_cli import emit, replay
 from .llm import DeepSeek, MockModel, ModelError
 from .review import ReviewError, ReviewQueue, binding_key, send_reviewed
 from .review_transport import WindowsReviewedTransport
 from .memory import MemoryStorageError, open_memory
+from .review_snapshot import load_snapshot, save_snapshot
 
 
 def main(argv=None):
@@ -23,10 +23,12 @@ def main(argv=None):
     parser.add_argument("--binding", default="state/douyin-session.json")
     parser.add_argument("--config", default="config.example.json")
     sub = parser.add_subparsers(dest="command", required=True)
+    snapshot = sub.add_parser("snapshot", help="Save current bound chat for manual selection; never calls a model")
+    snapshot.add_argument("--output", required=True, help="New file path; existing files are never overwritten")
+    snapshot.add_argument("--show-text", action="store_true")
     generate = sub.add_parser("generate", help="Generate a pending reply from one manually selected snapshot row")
     generate.add_argument("--snapshot", required=True)
     generate.add_argument("--index", type=int, required=True)
-    generate.add_argument("--snapshot-window-handle", type=int)
     generate.add_argument("--mock", action="store_true")
     sub.add_parser("list")
     for name in ("show", "edit", "discard", "approve", "check", "send", "resolve"):
@@ -50,23 +52,36 @@ def main(argv=None):
     memory = None
     try:
         queue = ReviewQueue(args.queue)
-        if args.command == "generate":
+        if args.command == "snapshot":
             binding = Binding.load(args.binding)
-            report = json.loads(Path(args.snapshot).read_text(encoding="utf-8-sig"))
-            handle = args.snapshot_window_handle or binding.window_handle
-            window = select_window(report, handle)
-            messages = parse_window(window, expected_title=binding.window_title, expected_heading=binding.group_heading)
+            messages = save_snapshot(args.output, binding)
+            emit(status="review_snapshot_saved", snapshot=args.output, target=binding.group_heading,
+                 text_messages=len(messages), sent=False, platform_ids_available=False)
+            for index, message in enumerate(messages):
+                row = dict(index=index, characters=len(message.text),
+                           sender_label_available=bool(message.sender_name),
+                           sender_inherited=message.sender_inherited, is_self=None)
+                if args.show_text:
+                    row.update(text=message.text, sender_name=message.sender_name)
+                emit(**row)
+        elif args.command == "generate":
+            binding = Binding.load(args.binding)
+            raw, messages = load_snapshot(args.snapshot, binding)
+            if not 0 <= args.index < len(messages):
+                raise ObservationError("message_index_out_of_range")
             config = Config.load(args.config)
             load_env()
             model = MockModel() if args.mock else DeepSeek(config)
             memory = open_memory(config) if config.memory_enabled else None
             scope = memory.space_for_binding(binding) if memory is not None else None
-            source = "snapshot:" + hashlib.sha256(Path(args.snapshot).read_bytes()).hexdigest() + ":" + str(handle) + ":" + str(args.index)
+            source = "snapshot:" + hashlib.sha256(raw).hexdigest() + ":" + str(binding.window_handle) + ":" + str(args.index)
             trace = {}
             reply = replay(messages, args.index, model, config, memory=memory, memory_space=scope,
                            memory_source=source, memory_trace=trace)
             # Sending is single-line; preserve words while flattening model paragraphs.
             reply = " ".join(reply.splitlines())
+            if Binding.load(args.binding) != binding:
+                raise ReviewError("session_changed_recreate_reply")
             item_id = queue.enqueue(binding, messages[args.index].text, reply)
             emit(status="pending_review", id=item_id, revision=1, target=binding.group_heading,
                  reply=reply, sent=False, memory=trace)
@@ -97,10 +112,12 @@ def main(argv=None):
             outcome = transport.check(binding, item["source"], item["reply"], Config.load(args.config).pause_path)
             emit(status="preflight_ready" if outcome == "ready" else "preflight_not_ready", sent=False)
         elif args.command == "send":
+            from .autonomous import InstanceLock
             config = Config.load(args.config)
             binding = Binding.load(args.binding)
-            outcome = send_reviewed(queue, args.id, args.revision, binding,
-                                    WindowsReviewedTransport(), config.pause_path, config)
+            with InstanceLock('state/autonomous.lock'):
+                outcome = send_reviewed(queue, args.id, args.revision, binding,
+                                        WindowsReviewedTransport(), config.pause_path, config)
             memory_status = "not_stored"
             if outcome == "visible_sent" and config.memory_enabled:
                 try:

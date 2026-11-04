@@ -100,6 +100,74 @@ class ParserTests(unittest.TestCase):
                     observer.read()
 
 
+def private_fixture():
+    pane = 'root/private'
+    main = pane + '/1/0/0'
+    base = main + '/0'
+    nodes = [node('root', 16, 'App'), node('root/contacts/name', 41, 'Contact'),
+             node(pane + '/0/1/1/0', 41, 'Contact'), node(base),
+             node(main + '/3/1/0', action='激活')]
+    nodes += [node(base + '/3'), node(base + '/3/0/avatar', 40),
+              node(base + '/3/1'), node(base + '/3/1/wrapper/text', 41, 'hello'),
+              node(base + '/2', 41, '刚刚'),
+              node(base + '/1'), node(base + '/1/0'), node(base + '/1/0/wrapper/text', 41, 'test'),
+              node(base + '/0'), node(base + '/0/0', 41, 'friendship notice')]
+    return dict(process_id=7, window_handle=9, process_started_at='start-1',
+                result=dict(Nodes=nodes, Errors=[], Truncated=False))
+
+
+class PrivateParserTests(unittest.TestCase):
+    def parse(self, window):
+        return parse_window(window, expected_title='App', expected_heading='Contact')
+
+    def test_private_header_not_contact_list_and_continuations_keep_unknown_identity(self):
+        messages = self.parse(private_fixture())
+        self.assertEqual([m.text for m in messages], ['hello', 'test'])
+        for message in messages:
+            self.assertIsNone(message.sender_name)
+            self.assertIsNone(message.sender_id)
+            self.assertIsNone(message.is_self)
+
+    def test_wrong_private_header_with_matching_contact_list_never_passes(self):
+        window = private_fixture()
+        next(n for n in window['result']['Nodes'] if n['Path'].endswith('/0/1/1/0'))['Name'] = 'Other'
+        with self.assertRaises(ObservationError):
+            self.parse(window)
+
+    def test_unread_badge_can_shift_private_header_without_changing_target(self):
+        window = private_fixture()
+        header = next(n for n in window['result']['Nodes'] if n['Path'].endswith('/0/1/1/0'))
+        header['Path'] = header['Path'].replace('/0/1/1/0', '/0/2/1/0')
+        window['result']['Nodes'].append(node('root/private/0/1/0', 41, '1'))
+        self.assertEqual([m.text for m in self.parse(window)], ['hello', 'test'])
+
+    def test_dismissed_greeting_panel_moves_composer_to_slot_two(self):
+        window = private_fixture()
+        composer = next(n for n in window['result']['Nodes'] if n.get('DefaultAction') == '激活')
+        composer['Path'] = composer['Path'].replace('/3/1/0', '/2/1/0')
+        self.assertEqual([m.text for m in self.parse(window)], ['hello', 'test'])
+
+    def test_unmeasured_composer_position_is_rejected(self):
+        window = private_fixture()
+        composer = next(n for n in window['result']['Nodes'] if n.get('DefaultAction') == '激活')
+        composer['Path'] = composer['Path'].replace('/3/1/0', '/4/1/0')
+        with self.assertRaises(ObservationError):
+            self.parse(window)
+
+    def test_private_media_and_profile_labels_are_not_text(self):
+        window = private_fixture()
+        window['result']['Nodes'].append(node('root/private/1/0/0/0/1/0/image', 40))
+        self.assertEqual([m.text for m in self.parse(window)], ['hello'])
+
+    def test_duplicate_private_panes_stop(self):
+        window = private_fixture()
+        extra = [dict(n, Path=n['Path'].replace('root/private', 'root/second'))
+                 for n in window['result']['Nodes'] if n['Path'].startswith('root/private')]
+        window['result']['Nodes'].extend(extra)
+        with self.assertRaisesRegex(ObservationError, 'private_chat_not_unique'):
+            self.parse(window)
+
+
 class TrackerTests(unittest.TestCase):
     def test_baseline_restart_and_unchanged_never_emit_history(self):
         messages = [observed("a"), observed("b")]

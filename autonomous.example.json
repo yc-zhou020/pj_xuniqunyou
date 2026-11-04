@@ -1,0 +1,12 @@
+{
+  "whitelist": [
+    {"name": "Nefariousa", "binding": "state/douyin-nefariousa-test.json"}
+  ],
+  "reply_config": "config.autonomous.example.json",
+  "state_path": "state/replies.sqlite3",
+  "log_path": "state/autonomous.log",
+  "log_text": false,
+  "interval": 5,
+  "window_policy": "restore_background",
+  "allowed_api_base": "https://api.deepseek.com"
+}

@@ -107,6 +107,9 @@ class ReviewQueue:
             self.db.execute("BEGIN IMMEDIATE")
             if self.db.execute("SELECT 1 FROM replies WHERE state IN ('sending','unknown') LIMIT 1").fetchone():
                 raise ReviewError("unresolved_send_requires_manual_check")
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='auto_jobs'").fetchone():
+                if self.db.execute("SELECT 1 FROM auto_jobs WHERE status IN ('sending','unknown') LIMIT 1").fetchone():
+                    raise ReviewError('unresolved_auto_send_requires_manual_check')
             item = self.get(item_id)
             if item["state"] != "approved" or item["revision"] != revision:
                 raise ReviewError("reply_not_approved_at_this_revision")
@@ -119,6 +122,9 @@ class ReviewQueue:
             for seconds, limit in ((cooldown_seconds, 1), (3600, hourly_limit), (86400, daily_limit)):
                 count = self.db.execute("SELECT COUNT(*) FROM replies WHERE state='visible_sent' AND updated>=?",
                                         (self.clock() - seconds,)).fetchone()[0]
+                if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='auto_jobs'").fetchone():
+                    count += self.db.execute("SELECT COUNT(*) FROM auto_jobs WHERE status='visible_sent' AND updated>=?",
+                                             (self.clock() - seconds,)).fetchone()[0]
                 if count >= limit:
                     raise ReviewError("review_send_rate_limited")
             self.db.execute("UPDATE replies SET state='sending',updated=? WHERE id=?", (self.clock(), item_id))

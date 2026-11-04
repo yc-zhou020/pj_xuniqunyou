@@ -1,5 +1,7 @@
 .env
 config.local.json
+autonomous.local.json
+config.autonomous.local.json
 .venv/
 .uv-cache/
 __pycache__/

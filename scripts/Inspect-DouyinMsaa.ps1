@@ -23,6 +23,7 @@ public class DouyinMsaaNode {
     public int Children;
     public string Name;
     public string DefaultAction;
+    public int[] Bounds;
 }
 public class DouyinMsaaResult {
     public List<DouyinMsaaNode> Nodes = new List<DouyinMsaaNode>();
@@ -42,10 +43,13 @@ public static class DouyinMsaaInspector {
         try {
             bool self = Convert.ToInt32(childId) == 0;
             int count = self ? obj.accChildCount : 0;
+            int x,y,width,height;
+            obj.accLocation(out x,out y,out width,out height,childId);
             result.Nodes.Add(new DouyinMsaaNode {
                 Path = path, Role = Convert.ToInt32(obj.get_accRole(childId)), Children = count,
                 Name = text ? obj.get_accName(childId) : "[redacted]",
-                DefaultAction = obj.get_accDefaultAction(childId)
+                DefaultAction = obj.get_accDefaultAction(childId),
+                Bounds = new int[]{x,y,width,height}
             });
             if (count == 0) return;
             if (depth >= maxDepth) { result.Truncated = true; return; }
@@ -88,6 +92,7 @@ $reports = @(foreach ($window in $windows) {
             process_started_at = $process.StartTime.ToUniversalTime().ToString('o')
             window_handle = $info.NativeWindowHandle
             class_name = $info.ClassName
+            is_offscreen = $info.IsOffscreen
             result = [DouyinMsaaInspector]::Read([IntPtr]$info.NativeWindowHandle, [bool]$IncludeText, $MaxNodes, $MaxDepth)
         }
     }
