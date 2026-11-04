@@ -1,0 +1,17 @@
+{
+  "backend": "browser",
+  "reply_config": "config.autonomous.local.json",
+  "whitelist": [{"name": "Nefariousa", "douyin_id": "", "sec_uid": ""}],
+  "profile_dir": "state/firefox-profile",
+  "browser_path": ".playwright-browsers",
+  "state_path": "state/replies.sqlite3",
+  "snapshot_dir": "state/browser-snapshots",
+  "log_path": "state/browser.log",
+  "headless": true,
+  "sample_interval_seconds": 5,
+  "min_send_interval_seconds": 5,
+  "context_messages": 7,
+  "allowed_api_base": "https://api.deepseek.com",
+  "max_model_attempts": 3,
+  "retention_days": 7
+}

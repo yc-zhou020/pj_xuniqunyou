@@ -160,6 +160,7 @@ class RuntimeTests(unittest.TestCase):
         with patch('group_friend.autonomous.RuntimeState') as state, \
                 patch('group_friend.autonomous.DeepSeek') as model, \
                 patch('group_friend.autonomous.PrivateRuntime') as runtime, \
+                patch('group_friend.autonomous.InstanceLock'), \
                 patch('group_friend.autonomous.make_logger'), redirect_stdout(io.StringIO()):
             runtime.return_value.observe.return_value = []
             self.assertEqual(main(['--config', str(settings), '--inspect']), 0)

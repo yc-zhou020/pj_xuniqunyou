@@ -2,6 +2,8 @@
 config.local.json
 autonomous.local.json
 config.autonomous.local.json
+browser.local.json
+.playwright-browsers/
 .venv/
 .uv-cache/
 __pycache__/
@@ -13,3 +15,4 @@ diagnostics/
 *.egg-info/
 build/
 dist/
+example/

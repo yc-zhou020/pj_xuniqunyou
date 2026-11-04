@@ -107,6 +107,9 @@ class ReviewQueue:
             self.db.execute("BEGIN IMMEDIATE")
             if self.db.execute("SELECT 1 FROM replies WHERE state IN ('sending','unknown') LIMIT 1").fetchone():
                 raise ReviewError("unresolved_send_requires_manual_check")
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_jobs'").fetchone():
+                if self.db.execute("SELECT 1 FROM browser_jobs WHERE status IN ('sending','unknown') LIMIT 1").fetchone():
+                    raise ReviewError('unresolved_browser_send_requires_manual_check')
             if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='auto_jobs'").fetchone():
                 if self.db.execute("SELECT 1 FROM auto_jobs WHERE status IN ('sending','unknown') LIMIT 1").fetchone():
                     raise ReviewError('unresolved_auto_send_requires_manual_check')

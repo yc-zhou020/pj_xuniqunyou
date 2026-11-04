@@ -1,5 +1,33 @@
 # DeepSeek 抖音虚拟群友：当前开发交接
 
+## 最新：2026-11-04 11:02 网页真实发送成功
+
+- 用户持续测试采到新消息并成功生成，但 `exact_draft_not_confirmed`；旧实现把填草稿失败误标 unknown，阻断后续任务。用户明确人工确认未发出，已通过正式 `--resolve ... --outcome not_sent` 处理任务 82aefb...，没有删回执或重试它。
+- 真实编辑器证据：Firefox 对 Slate/editor-kit 执行 `fill()` 会触发整段 insertCompositionText，结果将同一文字重复两遍。固定测试文字 18 字符读回为 37 字符（两段加换行）。按 example 的按键方式 `press_sequentially(..., delay=0)` 输入后，完整草稿一致；测试草稿已移除。
+- 已将发送拆为 prepare 和 submit：prepare 按键输入、等待渲染、核验完整草稿、身份、源消息及可用按钮；失败保持 generated，不标未知。紧邻单次按钮点击才持久标记 sending；点击异常仍 unknown 且绝不自动重试。新增真实 Firefox composition 回归用例和发送前失败可恢复且不重新生成的状态测试。
+- **用户新增明确授权：允许在测试中点击发送。** 此授权取代之前本轮测试不得由 Codex 点击的限制，范围仍仅 Nefariousa 白名单私聊，不向群聊发送。
+- 使用真实生产命令 `--once` 处理已排队但未回复的另一条来信：11:02:52 generated，11:02:53 visible_sent/confirmed，任务 5087a2...。真实 DeepSeek→无界面 Firefox→单次发送→己方气泡/空草稿确认链路通过；不是模拟测试。旧任务保持 not_sent。
+- 随后 `--duration 180` 持续测试于 11:03:24 started、11:06:24 正常退出（exit 0）：37 次采样、0 次额外发送、delivery_blocked=false，没有重放历史。期间没有新来信，不能据此声称多轮回复已验收；目前无常驻测试进程。完整 **149 项测试通过**，包括浏览器核心 25 项及真实 Firefox 本地 3 项；uv 锁及 diff 检查通过。旧检查模式单元测试已隔离生产锁，避免与真实运行争用；真实单实例锁不变。
+- 清理阶段的浏览器关闭异常不再覆盖 Ctrl+C 或原始故障，BrowserSession 即使 driver.stop 抛异常也会清空已关闭引用。
+
+## 当前路线：2026-11-04 网页版迁移
+
+本节取代下方关于当前架构、依赖和启动方式的旧结论；下方保留原生路线历史证据，不删除旧回执。
+
+- 用户明确选择参考 `example/` 的 Playwright/Firefox 网页路线，手动登录；固定 5 秒采样、发送最小间隔 5 秒；Python 直接调用 DeepSeek，使用结构化文本快照，不经过 Node 幕间桥接。见 docs/EXAMPLE_ALIGNMENT.md。不要再次询问这三项。
+- 用户已在专用 Firefox 手动登录并选中 Nefariousa，随后关闭窗口。登录与平台身份绑定已成功保存到忽略的 `browser.local.json` 和 `state/firefox-profile/`，不要用 example 配置覆盖。白名单只有 Nefariousa，含实际抖音号及 sec_uid；不要输出 Cookie、密码或 .env。
+- 当前 `browser.local.json` 已切 `headless=true`。使用持久资料的 headed Firefox 冷启动曾间歇超时，尚未确认根因；同一资料的无界面启动及两次真实私聊读取成功。无需 Windows 客户端保持可见，不依赖系统焦点或隐藏桌面。
+- 新入口：`uv run --locked python run_friend.py --config browser.local.json`。不指定配置时优先 browser.local.json；显式 autonomous.local.json 仍为旧原生路线。用户之前明确选择自行终端启动真实发送；本轮未替用户启动真实发送，没有新的实际 DeepSeek 调用。
+- 已实现 browser_session（持久 Firefox、登录状态等待和严格身份选择）、browser_setup（纯手动登录与绑定）、conversation_snapshot（方向/真实 ID/时间/当前来信标记与预算）、browser_state（持久游标、队列和发送回执）、browser_engine（采样与模型并行、单次按钮发送）、browser_runtime（CLI）。气泡/身份读取和选择器参考代码保留在 browser_reference/，含 AGPL-3.0 LICENSE；来源见 THIRD_PARTY_NOTICES.md。
+- 固定采样采用 monotonic 调度；模型工作在线程中进行；耗时页面操作会记录 sample_lag。生成结果持久化，5 秒发送间隔及小时/日配额仅延后任务，不丢弃或重复付费生成。原配置小时 30 条、日 100 条仍有效。
+- 人工草稿不覆盖；人工回复（包括同一采样已出现的回复）取消对应任务。移出白名单的持久任务不得执行。发送只点击一次，sending 在重启后转 unknown，任何 unknown 阻止三个后端继续发送；不自动重试、删除或重写旧回执。平台 ID 缺失保持空值，本地指纹不是平台 ID。
+- `--inspect` 只读、无模型、无回复状态写入；`--inspect --duration 60` 每 5 秒重复读取。实际生产入口 inspection_ready：11 条、11 个平台消息 ID、1 条 outgoing。一分钟只读采样 12 次稳定完成，登录资料复用成功；已结束，没有后台常驻或真实发送进程。
+- 实际无界面 Firefox 的本地 HTML 集成测试通过：气泡读取/重复文字 ID、方向、单次填写点击/确认、人工草稿保护与身份不匹配拒绝。它不访问抖音、不使用登录资料。24 小时虚拟时间测试通过：17,280 次采样、2,880 模拟来信，含模型临时超时和历史滑动，全部确认且发送间隔不少于 5 秒；测试中提高了配额，不代表当前配置允许每天发 2,880 条。
+- 全套 146 项测试已通过；随后增加同一采样人工接管保护，浏览器核心 24 项全部再次通过（合计应为 147）。uv lock --check --offline 通过。网页真实 DeepSeek→发送以及长时间真实收发仍待用户从终端验收，不将原生单次成功或模拟耐久结果当成网页实网验收。
+- Playwright 1.64.1 已锁定，专用 Firefox 已装在忽略的 .playwright-browsers/；新环境按 README 安装。setuptools 已声明打包参考 JS 和 LICENSE。长期记忆未启用；原群绑定和原生状态数据库保留。
+
+下一步：用户从终端运行上述持续命令，看到 started/baseline 后由 Nefariousa 发新文字，观察 sampled→generated→visible_sent/confirmed；采集后续日志继续修复。不要在群聊测试。现阶段不需要重复手动登录，只有明确 login_required/risk 才由用户重新执行 `--login`。
+
 最后核对：2026-11-03，用户时区 America/New_York。
 
 ## 最新：持续等待的输入栏移位修复及后台窗口管理

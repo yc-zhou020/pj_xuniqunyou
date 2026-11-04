@@ -118,6 +118,9 @@ class RuntimeState:
     def blocked(self):
         if self.db.execute("SELECT 1 FROM auto_jobs WHERE status IN ('sending','unknown') LIMIT 1").fetchone():
             return True
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_jobs'").fetchone():
+            if self.db.execute("SELECT 1 FROM browser_jobs WHERE status IN ('sending','unknown') LIMIT 1").fetchone():
+                return True
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='replies'").fetchone():
             return self.db.execute("SELECT 1 FROM replies WHERE state IN ('sending','unknown') LIMIT 1").fetchone() is not None
         return False

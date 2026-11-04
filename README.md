@@ -1,10 +1,56 @@
 # DeepSeek 抖音虚拟群友
 
-通过 DeepSeek 在真实抖音群中生成回复的本地项目，当前提供 Windows 只读观察、手动历史回放、回复审核队列和长期记忆。
+独立 Python 白名单私聊助手。当前主路线参考 `example/douyin-bot`，使用 Playwright/Firefox 操作抖音网页版，Python 将结构化聊天快照直接交给 DeepSeek；运行期间不需要 Codex 介入。
 
-已实现独立 Python 白名单私聊运行器，用户已确认一次真实模型生成及自动发送成功。持续模式已修复输入框移位识别，并加入最小化后的后台恢复及发送后的焦点归还；新窗口管理模式的持续收发仍需用户终端验证。接续开发先读 [CODEX_HANDOFF.md](CODEX_HANDOFF.md)，最新实测见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+## 网页版运行（当前路线）
 
-## 独立白名单私聊运行
+本机 `browser.local.json` 已保存 Nefariousa 的昵称、抖音号和 sec_uid 绑定，使用专用持久 Firefox 资料目录。用户手动登录已完成；关闭登录窗口后可以直接启动无界面模式，不必保持 Windows 客户端或聊天窗口可见。
+
+在本目录启动持续回复，由用户自行执行：
+
+```powershell
+uv run --locked python run_friend.py --config browser.local.json
+```
+
+固定每 5 秒安排一次采样，发送至少间隔 5 秒。模型请求在独立线程中进行，不会阻塞采样；页面操作过慢时会记录 `sample_lag`。首次启动建立历史基线，之后处理新来信；已有检查点时恢复增量及未完成任务。需要处理启动时最新一条来信，可使用 `--once --reply-latest`；已经有检查点时以检查点为准，不重做已处理消息。连续运行无需 `--once`。本机回复配置 `dry_run=false`，可以真实发送。原有每小时 30 条、每天 100 条限制仍保留，达到限制会保留草稿并延后发送。
+
+只读检查与日志：
+
+```powershell
+uv run --locked python run_friend.py --config browser.local.json --inspect
+uv run --locked python run_friend.py --config browser.local.json --inspect --duration 60
+uv run --locked python run_friend.py --config browser.local.json --status
+Get-Content state/browser.log -Tail 30 -Wait
+```
+
+`--inspect` 不调用模型、不发送、不创建回复任务；快照保存在 `state/browser-snapshots/`。`--dry-run` 会调用模型、记录已处理任务但不发送，`--mock` 使用离线模型且不发送。按 Ctrl+C 停止；`state/PAUSE` 存在时程序停止工作，需要删除后重新启动。运行时不要关闭终端进程。
+
+发送前再次核验会话平台身份、源来信和草稿。只点击一次发送按钮；结果不明会持久标记 `unknown` 并阻止继续发送，重启不会重发。人工确认结果后停止运行器，至少等 90 秒，再记录处理结果：
+
+```powershell
+uv run --locked python run_friend.py --config browser.local.json --resolve <JOB_ID> --outcome not_sent --note "人工核对未发送"
+```
+
+确认已发送则用 `--outcome visible_sent`。该操作只记录处理结果，不重试该任务。浏览器版与原生版共用单实例锁和未知发送阻断，不能同时启动。
+
+新环境安装及手动登录：
+
+```powershell
+uv sync --locked
+$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD/.playwright-browsers"
+uv run --locked python -m playwright install firefox
+Copy-Item browser.example.json browser.local.json
+Copy-Item config.autonomous.example.json config.autonomous.local.json
+uv run --locked python run_friend.py --config browser.local.json --login
+```
+
+已有配置不要重复复制覆盖。登录、验证码、安全验证由用户操作；助手不获取密码或自动登录。手动打开目标私聊，完成平台 ID 绑定后登录窗口会退出；常规运行用 `headless=true`。新环境回复配置默认 dry-run，实际发送前由用户修改。只支持白名单私聊文字，不向群聊发送。媒体不调用视觉模型，快照会明确标记未读取实际内容。
+
+现有验证包括：24 小时虚拟时间耐久测试（17,280 次采样、2,880 条模拟来信），实际无界面 Firefox 本地收发测试，真实登录资料复用及五秒采样。2026-11-04 已实测网页版真实 DeepSeek→Nefariousa 发送成功，日志 visible_sent/confirmed。Firefox 的整段 fill 会在实际编辑器重复文字，已改为按键输入并保留完整草稿校验。**长时间真实收发仍待验收**，不把模拟耐久测试当成实网验收。
+
+架构取舍见 [docs/EXAMPLE_ALIGNMENT.md](docs/EXAMPLE_ALIGNMENT.md)，交接见 [CODEX_HANDOFF.md](CODEX_HANDOFF.md)，验证见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。下方保留原生路线历史说明，须显式使用 `autonomous.local.json` 才会走该路线。
+
+## 旧版 Windows 原生私聊路线
 
 入口是 `run_friend.py`，运行期间不调用 Codex，也不依赖本聊天。Python 直接采集 Windows MSAA、调用 DeepSeek，并通过本地 PowerShell 原生助手发送；不再逐条创建人工审核项。登录和账号切换仍由用户手动完成。
 
