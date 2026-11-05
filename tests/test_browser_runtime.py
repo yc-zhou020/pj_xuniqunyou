@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from group_friend.reply_worker import ReplyWorker
 from group_friend.browser_engine import BrowserEngine
 from group_friend.browser_errors import BrowserUIError
 from group_friend.browser_state import BrowserState
@@ -99,6 +100,34 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(snapshot.has_manual_reply(snapshot.messages + (mine,), set()))
         self.assertFalse(snapshot.has_manual_reply(snapshot.messages + (mine,), {mine.key}))
 
+    def test_prepended_history_preserves_selected_source_positions(self):
+        old = (message('old', mid='1'), message('question', mid='2'))
+        snapshot = ConversationSnapshot(FRIEND, 1, old, (1,))
+        current = (message('older history', mid='0'),) + old + (message('new', mid='3'),)
+        self.assertEqual(snapshot.locate(current)[0], [2])
+        self.assertEqual(snapshot.refreshed(current, 2).selected, (2,))
+
+    def test_missing_tail_anchor_still_rejects_history_change(self):
+        old = (message('old', mid='1'), message('question', mid='2'))
+        snapshot = ConversationSnapshot(FRIEND, 1, old, (1,))
+        with self.assertRaises(ContinuityError):
+            snapshot.locate((message('older', mid='0'), old[0], message('new', mid='3')))
+
+    def test_repeated_rows_without_unique_alignment_remain_blocked(self):
+        old = (message('old'), message('repeat'), message('repeat'))
+        snapshot = ConversationSnapshot(FRIEND, 1, old, (2,))
+        with self.assertRaises(ContinuityError):
+            snapshot.locate((message('repeat'), message('repeat'), message('new')))
+
+    def test_media_loading_does_not_hide_an_unchanged_text_source(self):
+        media = ChatMessage('', 'incoming', kind='unsupported', message_id='media')
+        old = (message('question', mid='source'), media)
+        snapshot = ConversationSnapshot(FRIEND, 1, old, (0,))
+        current = (old[0], replace(media, kind='sticker'))
+        self.assertEqual(snapshot.locate(current)[0], [0])
+        with self.assertRaises(ContinuityError):
+            snapshot.locate((replace(old[0], text='edited question'), current[1]))
+
 
 class BrowserEngineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -149,8 +178,41 @@ class BrowserEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.engine.step())
         self.engine.sample(FRIEND, self.adapter.messages)
         self.assertFalse(await self.engine.step())
-        self.assertEqual(self.adapter.sent, ['[AI] reply-new'])
+        self.assertEqual(self.adapter.sent, ['reply-new'])
         self.assertEqual(self.status(), ['visible_sent'])
+
+    async def test_new_reply_gets_full_300_char_budget_after_removing_prefix(self):
+        async def long_reply(snapshot):
+            return '[AI] ' + '中' * 350
+        self.engine.request_reply = long_reply
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('new', 'new')
+        await self.engine.step()
+        self.assertEqual(self.adapter.sent, ['中' * 300])
+
+    async def test_existing_generated_draft_is_sent_without_legacy_prefix(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('new', 'new')
+        job = self.store.next_job('pending')
+        self.store.mark(job['id'], 'generated', reply='[AI] 旧草稿')
+        await self.engine.send_step()
+        self.assertEqual(self.adapter.sent, ['旧草稿'])
+        self.assertEqual(self.requests, [])
+
+    async def test_uncertain_reply_text_is_never_rewritten(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('new', 'new')
+        job = self.store.next_job('pending')
+        self.store.mark(job['id'], 'unknown', reply='[AI] 未决回复')
+        self.assertFalse(await self.engine.send_step())
+        self.assertEqual(self.store.job(job['id'])['reply'], '[AI] 未决回复')
+
+    async def test_incoming_question_about_ai_marker_is_not_discarded(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('[AI] 是什么意思？', 'new')
+        await self.engine.step()
+        self.assertEqual(len(self.requests), 1)
+        self.assertFalse(self.adapter.sent[0].startswith('[AI]'))
 
     async def test_manual_answer_in_same_sample_cancels_before_generation(self):
         self.engine.sample(FRIEND, self.adapter.messages)
@@ -294,6 +356,14 @@ class BrowserEngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.step()
         self.assertEqual(self.status(), ['visible_sent'])
 
+    async def test_prepended_history_does_not_replay_old_messages(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.adapter.messages.insert(0, message('older history', mid='older'))
+        self.assertEqual(self.engine.sample(FRIEND, self.adapter.messages), 0)
+        self.add_incoming('new', 'new')
+        await self.engine.step()
+        self.assertEqual(self.adapter.sent, ['reply-new'])
+
     async def test_hourly_quota_holds_a_draft_without_paid_regeneration(self):
         self.engine.config = replace(self.config, hourly_limit=1)
         self.engine.sample(FRIEND, self.adapter.messages)
@@ -314,6 +384,73 @@ class BrowserEngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.step()
         row = self.store.db.execute('SELECT status,snapshot,reply FROM browser_jobs').fetchone()
         self.assertEqual(tuple(row), ('visible_sent', None, None))
+
+    async def test_generation_without_any_browser_persists_reply_for_sender(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('question', '1')
+        worker = ReplyWorker(self.settings, self.config, self.store,
+                             self.engine.request_reply, self.engine.logger)
+        self.assertTrue(await worker.step())
+        self.assertEqual(self.status(), ['generated'])
+        self.assertEqual(self.adapter.sent, [])
+        self.assertEqual(len(self.requests), 1)
+        self.engine.request_reply = None
+        self.assertTrue(await self.engine.send_step())
+        self.assertEqual(self.status(), ['visible_sent'])
+        self.assertEqual(len(self.requests), 1)
+
+    async def test_sender_does_not_generate_pending_work(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('question', '1')
+        self.assertFalse(await self.engine.send_step())
+        self.assertEqual(self.status(), ['pending'])
+        self.assertEqual(self.requests, [])
+
+    async def test_slow_next_generation_does_not_block_ready_reply(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('one', '1')
+        await self.engine.generate_step()
+        self.add_incoming('two', '2')
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def slow(snapshot):
+            entered.set()
+            await release.wait()
+            return '[AI] second'
+        self.engine.request_reply = slow
+        task = asyncio.create_task(self.engine.generate_step())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertTrue(await self.engine.send_step())
+            self.assertEqual(self.status(), ['visible_sent', 'generating'])
+            release.set()
+            await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_older_model_retry_prevents_out_of_order_send(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('one', '1')
+        self.add_incoming('two', '2')
+        older = self.store.next_job('pending')
+        self.store.mark(older['id'], 'pending', delay=5)
+        await self.engine.generate_step()
+        self.assertEqual(self.status(), ['pending', 'generated'])
+        self.assertFalse(await self.engine.send_step())
+        self.now += 5
+        await self.engine.generate_step()
+        await self.engine.send_step()
+        self.assertEqual(self.adapter.sent, ['reply-one'])
+
+    async def test_dry_run_generation_cannot_be_sent_by_later_live_sender(self):
+        self.engine.sample(FRIEND, self.adapter.messages)
+        self.add_incoming('one', '1')
+        self.engine.config = replace(self.config, dry_run=True)
+        await self.engine.generate_step()
+        self.engine.config = self.config
+        self.assertFalse(await self.engine.send_step())
+        self.assertEqual(self.status(), ['dry_run'])
+        self.assertEqual(self.adapter.sent, [])
 
     async def test_24_hour_virtual_time_with_transient_model_faults(self):
         self.engine.config = replace(self.config, hourly_limit=10000, daily_limit=20000)
@@ -365,16 +502,90 @@ class RuntimeSupportTests(unittest.TestCase):
             with InstanceLock(path):
                 pass
 
-    def test_reply_validation_preserves_label_and_rejects_multiline_or_oversize(self):
-        self.assertEqual(validate_reply(' reply '), '[AI] reply')
-        self.assertEqual(validate_reply('[AI] reply'), '[AI] reply')
-        for reply in ('', 'line\nbreak', 'x' * 300):
+    def test_reply_validation_removes_legacy_label_and_allows_300_body_chars(self):
+        self.assertEqual(validate_reply(' reply '), 'reply')
+        self.assertEqual(validate_reply('[AI] reply'), 'reply')
+        self.assertEqual(validate_reply('[AI] [AI] reply'), 'reply')
+        self.assertEqual(validate_reply('解释 [AI] 的含义'), '解释 [AI] 的含义')
+        self.assertEqual(validate_reply('中' * 300), '中' * 300)
+        self.assertEqual(validate_reply('[AI] ' + '中' * 300), '中' * 300)
+        self.assertEqual(validate_reply('x', limit=1), 'x')
+        self.assertEqual(Config('local', 'bot', max_reply_chars=1).max_reply_chars, 1)
+        for reply in ('', '[AI]', '[AI]   ', 'line\nbreak', 'x' * 301):
             with self.subTest(reply=reply):
                 with self.assertRaises(ReplyError):
                     validate_reply(reply)
 
 
 class BrowserPersistenceTests(unittest.TestCase):
+    def test_media_observation_survives_restart_without_new_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'queue.db'
+            media = ChatMessage('', 'incoming', kind='unsupported', message_id='media')
+            store = BrowserState(path)
+            store.ingest(FRIEND, [media])
+            store.close()
+            restored = BrowserState(path)
+            try:
+                self.assertEqual(restored.ingest(FRIEND, [replace(media,kind='sticker')])[0], 0)
+                self.assertIsNone(restored.next_job())
+                self.assertEqual(restored.db.execute('SELECT COUNT(*) FROM browser_cursors').fetchone()[0], 1)
+            finally:
+                restored.close()
+
+    def test_legacy_media_cursor_upgrade_requires_exact_saved_snapshot(self):
+        store = BrowserState(':memory:')
+        try:
+            media = ChatMessage('', 'incoming', kind='unsupported', message_id='media')
+            store.db.execute('INSERT INTO browser_cursors VALUES(?,?,?)',
+                             (FRIEND['sec_uid'],json.dumps([media.key]),1))
+            store.db.commit()
+            loaded = replace(media,kind='sticker')
+            with self.assertRaises(ContinuityError):
+                store.ingest(FRIEND,[loaded],previous_messages=[replace(media,message_id='wrong')])
+            self.assertEqual(store.ingest(FRIEND,[loaded],previous_messages=[media])[0],0)
+            self.assertIsNone(store.next_job())
+        finally:
+            store.close()
+
+    def test_unidentified_media_changes_remain_ambiguous(self):
+        store = BrowserState(':memory:')
+        try:
+            media = ChatMessage('', 'incoming', kind='unsupported')
+            store.ingest(FRIEND,[media])
+            with self.assertRaises(ContinuityError):
+                store.ingest(FRIEND,[replace(media,kind='sticker')])
+        finally:
+            store.close()
+
+    def test_changed_text_with_same_native_id_does_not_advance_cursor(self):
+        store = BrowserState(':memory:')
+        try:
+            original = message('original',mid='text-id')
+            store.ingest(FRIEND,[original])
+            with self.assertRaises(ContinuityError):
+                store.ingest(FRIEND,[replace(original,text='edited')])
+            keys=json.loads(store.db.execute('SELECT keys FROM browser_cursors').fetchone()[0])
+            self.assertEqual(keys,[original.key])
+        finally:
+            store.close()
+    def test_restart_and_history_prepend_queue_only_new_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'queue.sqlite3'
+            old = [message('previous', mid='1'), message('answered', 'outgoing', '2')]
+            store = BrowserState(path)
+            store.ingest(FRIEND, old)
+            store.close()
+            restored = BrowserState(path)
+            try:
+                current = [message('older history', mid='0'), *old, message('new', mid='3')]
+                self.assertEqual(restored.ingest(FRIEND, current)[0], 1)
+                snapshot = ConversationSnapshot.loads(restored.next_job('pending')['snapshot'])
+                self.assertEqual([snapshot.messages[i].message_id for i in snapshot.selected], ['3'])
+                self.assertEqual(restored.ingest(FRIEND, current)[0], 0)
+            finally:
+                restored.close()
+
     def test_legacy_uncertain_receipts_still_block_browser_sends(self):
         for table, column in (('auto_jobs', 'status'), ('replies', 'state')):
             with self.subTest(table=table):
@@ -385,6 +596,38 @@ class BrowserPersistenceTests(unittest.TestCase):
                     self.assertTrue(store.blocked())
                 finally:
                     store.close()
+
+    def test_stage_start_does_not_reset_other_active_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'queue.sqlite3'
+            first = BrowserState(path)
+            self.addCleanup(first.close)
+            first.ingest(FRIEND, [message('question', mid='1')], reply_latest=True)
+            job = first.next_job()
+            first.mark(job['id'], 'generating')
+            second = BrowserState(path, recover=('send',))
+            self.addCleanup(second.close)
+            self.assertEqual(second.job(job['id'])['status'], 'generating')
+            first.mark(job['id'], 'sending')
+            third = BrowserState(path, recover=('generate',))
+            self.addCleanup(third.close)
+            self.assertEqual(third.job(job['id'])['status'], 'sending')
+
+    def test_generated_reply_survives_restart_and_outgoing_is_shared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'queue.sqlite3'
+            first = BrowserState(path)
+            self.addCleanup(first.close)
+            first.ingest(FRIEND, [message('question', mid='1')], reply_latest=True)
+            job = first.next_job()
+            first.mark(job['id'], 'generated', reply='[AI] saved')
+            second = BrowserState(path)
+            self.addCleanup(second.close)
+            self.assertEqual(second.next_job('generated')['reply'], '[AI] saved')
+            self.assertEqual(first.known_outgoing(FRIEND['sec_uid']), set())
+            outgoing = message('[AI] saved', 'outgoing', '2')
+            second.confirmed(job['id'], [outgoing])
+            self.assertEqual(first.known_outgoing(FRIEND['sec_uid']), {outgoing.key})
 
     def test_checkpoint_and_pending_job_survive_restart_without_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:

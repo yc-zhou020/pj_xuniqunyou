@@ -28,6 +28,11 @@ LOGIN_REQUIRED_MARKERS = (
 
 # 风控/安全验证特征
 RISK_MARKERS = (
+    'text=请完成下列验证后继续',
+    '[class*="captcha_verify_container"]',
+    '[id*="captcha-verify"]',
+    'iframe[src*="verify.snssdk.com"]',
+    'iframe[src*="captcha"]',
     'text=安全验证',
     'text=完成验证',
     'text=验证身份',

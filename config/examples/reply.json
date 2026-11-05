@@ -1,8 +1,12 @@
 {
   "target_conversation": "private-browser",
   "self_identity": "local-ai",
+  "persona_path": "personas/default.txt",
   "dry_run": true,
   "memory_enabled": false,
+  "memory_recall_context_messages": 6,
+  "memory_recall_probability": 0.33,
+  "memory_keyword_similarity": 0.8,
   "cooldown_seconds": 5,
   "hourly_limit": 30,
   "daily_limit": 100

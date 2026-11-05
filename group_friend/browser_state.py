@@ -4,17 +4,17 @@ from pathlib import Path
 import sqlite3
 import time
 
-from .conversation_snapshot import ConversationSnapshot, digest, overlap_size, ContinuityError
+from .conversation_snapshot import ConversationSnapshot, digest, history_alignment, ContinuityError, observation_key
+from .targets import is_group, target_key
 
 
 class BrowserState:
-    def __init__(self, path, clock=time.time):
+    def __init__(self, path, clock=time.time, *, recover=('generate', 'send')):
         self.clock = clock
         if str(path) != ':memory:':
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
-        self._outgoing_cache = {}
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS browser_cursors(target TEXT PRIMARY KEY, keys TEXT NOT NULL, updated REAL NOT NULL);
@@ -26,10 +26,14 @@ class BrowserState:
             CREATE INDEX IF NOT EXISTS browser_job_time ON browser_jobs(status,updated);
             CREATE INDEX IF NOT EXISTS browser_target_time ON browser_jobs(target,status,updated);
             CREATE TABLE IF NOT EXISTS browser_outgoing(target TEXT,key TEXT,updated REAL,PRIMARY KEY(target,key));
+            CREATE TABLE IF NOT EXISTS browser_observation_cursors(
+                target TEXT PRIMARY KEY,cursor_digest TEXT NOT NULL,keys TEXT NOT NULL);
         ''')
         with self.db:
-            self.db.execute("UPDATE browser_jobs SET status='unknown' WHERE status='sending'")
-            self.db.execute("UPDATE browser_jobs SET status='pending' WHERE status='generating'")
+            if 'send' in recover:
+                self.db.execute("UPDATE browser_jobs SET status='unknown' WHERE status='sending'")
+            if 'generate' in recover:
+                self.db.execute("UPDATE browser_jobs SET status='pending' WHERE status='generating'")
 
     def close(self):
         self.db.close()
@@ -41,9 +45,10 @@ class BrowserState:
                     return True
         return False
 
-    def ingest(self, friend, messages, *, reply_latest=False):
-        target = friend['sec_uid']
+    def ingest(self, friend, messages, *, reply_latest=False, previous_messages=None):
+        target = target_key(friend)
         keys = [m.key for m in messages]
+        observed = [observation_key(m) for m in messages]
         previous = self.db.execute('SELECT keys FROM browser_cursors WHERE target=?', (target,)).fetchone()
         old = json.loads(previous[0]) if previous else None
         if old and not keys:
@@ -51,31 +56,61 @@ class BrowserState:
         if old is None or not old:
             indices = [len(messages) - 1] if reply_latest and messages else []
         else:
-            overlap = overlap_size(old, keys)
-            indices = list(range(overlap, len(messages)))
+            cached = self.db.execute('SELECT cursor_digest,keys FROM browser_observation_cursors WHERE target=?', (target,)).fetchone()
+            if cached and cached['cursor_digest'] == digest(old):
+                _, _, end = history_alignment(json.loads(cached['keys']), observed)
+            elif previous_messages is not None and [m.key for m in previous_messages] == old:
+                # Upgrade legacy cursors only from an exact matching accepted
+                # snapshot; never infer media identities from a local hash.
+                _, _, end = history_alignment([observation_key(m) for m in previous_messages], observed)
+            else:
+                _, _, end = history_alignment(old, keys)
+            indices = list(range(end, len(messages)))
         indices = [i for i in indices if messages[i].direction == 'incoming' and messages[i].kind == 'text'
-                   and messages[i].text and not messages[i].text.lstrip().startswith('[AI]')]
+                   and messages[i].text]
+        if is_group(friend):
+            allowed = {member['user_id'] for member in friend['members'] if not member.get('is_self')}
+            indices = [i for i in indices if messages[i].sender_id in allowed and messages[i].message_id]
         if self.db.execute("SELECT COUNT(*) FROM browser_jobs WHERE status IN ('pending','generating','generated')").fetchone()[0] >= 128:
             raise ContinuityError('pending_queue_full')
         added = 0
         with self.db:
-            for start in range(0, len(indices), 10):
-                selected = tuple(indices[start:start + 10])
+            batches = []
+            for index in indices:
+                if (not batches or len(batches[-1]) >= 10
+                        or (is_group(friend) and messages[batches[-1][-1]].sender_id != messages[index].sender_id)):
+                    batches.append([])
+                batches[-1].append(index)
+            for batch in batches:
+                selected = tuple(batch)
                 snapshot = ConversationSnapshot(friend, self.clock(), tuple(messages), selected)
                 key = digest([target, keys, selected])
                 cursor = self.db.execute('INSERT OR IGNORE INTO browser_jobs VALUES(?,?,?,?,?,0,?,?)',
                                          (key, target, 'pending', snapshot.dumps(), None, self.clock(), self.clock()))
                 added += cursor.rowcount
             self.db.execute('INSERT OR REPLACE INTO browser_cursors VALUES(?,?,?)', (target, json.dumps(keys), self.clock()))
+            self.db.execute('INSERT OR REPLACE INTO browser_observation_cursors VALUES(?,?,?)',
+                            (target, digest(keys), json.dumps(observed)))
         return added, old is None
 
     def job(self, job_id):
         row = self.db.execute('SELECT * FROM browser_jobs WHERE id=?', (job_id,)).fetchone()
         return dict(row) if row else None
 
-    def next_job(self):
-        row = self.db.execute("SELECT * FROM browser_jobs WHERE status IN ('pending','generated') AND due<=? ORDER BY rowid LIMIT 1",
-                              (self.clock(),)).fetchone()
+    def next_job(self, status=None):
+        statuses = (status,) if status else ('pending', 'generated')
+        if any(value not in ('pending', 'generated') for value in statuses):
+            raise ValueError('invalid_queue_status')
+        placeholders = ','.join('?' for _ in statuses)
+        # Preserve per-contact delivery order even when an older task is retrying
+        # generation or waiting for its send quota. Other contacts may proceed.
+        ordering = """AND NOT EXISTS (
+            SELECT 1 FROM browser_jobs older WHERE older.target=j.target
+            AND older.rowid<j.rowid AND older.status IN ('pending','generating','generated','sending','unknown')
+        )""" if status == 'generated' else ''
+        row = self.db.execute(f"""SELECT j.* FROM browser_jobs j
+            WHERE j.status IN ({placeholders}) AND j.due<=? {ordering}
+            ORDER BY j.rowid LIMIT 1""", (*statuses, self.clock())).fetchone()
         return dict(row) if row else None
 
     def mark(self, job_id, status, *, reply=None, snapshot=None, delay=0):
@@ -90,9 +125,8 @@ class BrowserState:
                 self.db.execute('UPDATE browser_jobs SET snapshot=NULL,reply=NULL WHERE id=?', (job_id,))
 
     def known_outgoing(self, target):
-        if target not in self._outgoing_cache:
-            self._outgoing_cache[target] = {row[0] for row in self.db.execute('SELECT key FROM browser_outgoing WHERE target=?', (target,))}
-        return self._outgoing_cache[target]
+        # Another stage process may have just confirmed a send.
+        return {row[0] for row in self.db.execute('SELECT key FROM browser_outgoing WHERE target=?', (target,))}
 
     def confirmed(self, job_id, messages):
         job = self.job(job_id)
@@ -100,7 +134,6 @@ class BrowserState:
             for message in messages:
                 if message.direction == 'outgoing' and message.text == job['reply']:
                     self.db.execute('INSERT OR IGNORE INTO browser_outgoing VALUES(?,?,?)', (job['target'], message.key, self.clock()))
-                    self.known_outgoing(job['target']).add(message.key)
             self.mark(job_id, 'visible_sent')
 
     def next_send_time(self, target, config, minimum_gap):
@@ -121,4 +154,3 @@ class BrowserState:
         with self.db:
             self.db.execute("DELETE FROM browser_jobs WHERE updated<? AND status IN ('visible_sent','cancelled_manual','cancelled_source','cancelled_whitelist','failed','dry_run','not_sent')", (cutoff,))
             self.db.execute('DELETE FROM browser_outgoing WHERE updated<?', (cutoff,))
-        self._outgoing_cache.clear()

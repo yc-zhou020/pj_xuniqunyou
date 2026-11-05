@@ -2,6 +2,7 @@
   "backend": "browser",
   "reply_config": "config.local.json",
   "whitelist": [{"name": "Nefariousa", "douyin_id": "", "sec_uid": ""}],
+  "group_whitelist": [],
   "profile_dir": "state/firefox-profile",
   "browser_path": ".playwright-browsers",
   "state_path": "state/replies.sqlite3",

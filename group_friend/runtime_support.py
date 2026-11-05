@@ -50,12 +50,19 @@ class ReplyError(ValueError):
     pass
 
 
+def strip_ai_prefix(text):
+    text = text.strip()
+    while text.startswith('[AI]'):
+        text = text[4:].lstrip()
+    return text
+
+
 def validate_reply(text, limit=300):
     if not isinstance(text, str) or not text.strip():
         raise ReplyError("empty_reply")
-    text = text.strip()
-    if not text.startswith("[AI]"):
-        text = "[AI] " + text
+    text = strip_ai_prefix(text)
+    if not text:
+        raise ReplyError("empty_reply")
     if len(text) > limit or any(ord(c) < 32 or 0x7f <= ord(c) < 0xa0 for c in text):
         raise ReplyError("reply_must_be_single_line_within_limit")
     return text

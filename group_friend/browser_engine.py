@@ -4,20 +4,28 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
+from playwright.async_api import Error as PlaywrightError
 
 from .conversation_snapshot import ChatMessage, ConversationSnapshot, ContinuityError, digest
-from .runtime_support import validate_reply
+from .reply_worker import ReplyWorker
+from .runtime_support import validate_reply, ReplyError
 from .browser_errors import BrowserUIError, ManualActionRequired
+from .browser_reference.douyin_chat import FriendNotFound, DouyinPageError
+from .targets import active_targets, allowed_snapshot, target_key
+from .browser_guard import require_no_verification
 
 
 class BrowserEngine:
-    def __init__(self, settings, config, store, adapter, request_reply, logger, *, clock=time.time, stop=None):
+    def __init__(self, settings, config, store, adapter, request_reply, logger, *, clock=time.time, stop=None, memory=None):
         self.settings, self.config, self.store, self.adapter = settings, config, store, adapter
         self.request_reply, self.logger, self.clock = request_reply, logger, clock
+        self.memory = memory
         self.stop = stop or asyncio.Event()
         self.ui_lock = asyncio.Lock()
         self.samples = self.sent = 0
+        self.ready_targets = set()
         self.last_error = None
+        self.manual_required = False
 
     def event(self, status, **data):
         self.logger.info(json.dumps(dict(status=status, **data), ensure_ascii=False))
@@ -31,22 +39,51 @@ class BrowserEngine:
             return await self.adapter.read(friend)
 
     def sample(self, friend, messages, *, reply_latest=False):
-        added, baseline = self.store.ingest(friend, messages, reply_latest=reply_latest)
+        previous = None
+        folder = self.settings.get('snapshot_dir')
+        if folder:
+            path = Path(folder) / (digest(target_key(friend))[:24] + '.json')
+            if path.is_file():
+                try:
+                    snapshot = ConversationSnapshot.loads(path.read_text(encoding='utf-8'))
+                    if target_key(snapshot.friend) == target_key(friend):
+                        previous = snapshot.messages
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+        added, baseline = self.store.ingest(friend, messages, reply_latest=reply_latest, previous_messages=previous)
         self.samples += 1
         folder = self.settings.get('snapshot_dir')
         if folder:
             directory = Path(folder)
             directory.mkdir(parents=True, exist_ok=True)
-            destination = directory / (digest(friend['sec_uid'])[:24] + '.json')
+            destination = directory / (digest(target_key(friend))[:24] + '.json')
             temp = destination.with_suffix('.tmp')
             temp.write_text(ConversationSnapshot(friend, self.clock(), tuple(messages), ()).dumps(), encoding='utf-8')
             temp.replace(destination)
         self.event('baseline' if baseline else 'sampled', target=friend['name'], messages=len(messages), queued=added,
                    delivery_blocked=self.store.blocked())
+        if target_key(friend) not in self.ready_targets:
+            self.ready_targets.add(target_key(friend))
+            self.event('ready', target=friend['name'], resumed=not baseline, dry_run=self.config.dry_run,
+                       message='采样就绪，新消息将按当前运行模式处理')
         return added
 
+    async def generate_step(self):
+        # Model work consumes durable snapshots only; it never touches the page.
+        worker = ReplyWorker(self.settings, self.config, self.store, self.request_reply,
+                             self.logger, clock=self.clock, stop=self.stop)
+        return await worker.step()
+
     async def step(self):
-        if self.paused():
+        """Compatibility helper for a single full pipeline iteration."""
+        if self.paused() or self.store.blocked():
+            return False
+        generated = await self.generate_step()
+        sent = await self.send_step()
+        return generated or sent
+
+    async def send_step(self):
+        if self.paused() or self.manual_required:
             return False
         if self.store.blocked():
             if self.last_error != 'unresolved_send':
@@ -54,15 +91,26 @@ class BrowserEngine:
                 self.last_error = 'unresolved_send'
             return False
         self.last_error = None
-        job = self.store.next_job()
+        job = self.store.next_job('generated')
         if job is None:
             return False
         snapshot = ConversationSnapshot.loads(job['snapshot'])
         friend = snapshot.friend
-        if friend not in self.settings['whitelist']:
+        if not allowed_snapshot(snapshot, self.settings):
             self.store.mark(job['id'], 'cancelled_whitelist')
             self.event('cancelled_whitelist')
             return True
+        try:
+            cleaned = validate_reply(job['reply'], limit=min(self.config.max_reply_chars, 300))
+        except ReplyError:
+            self.store.mark(job['id'], 'failed')
+            self.event('invalid_generated_reply', target=friend['name'])
+            return True
+        if cleaned != job['reply']:
+            # Only unsent generated drafts are normalized. Never alter an
+            # uncertain send or a historical receipt to change its text.
+            self.store.mark(job['id'], 'generated', reply=cleaned)
+            job['reply'] = cleaned
         try:
             current = await self.read(friend)
             known = self.store.known_outgoing(job['target'])
@@ -70,23 +118,6 @@ class BrowserEngine:
                 self.store.mark(job['id'], 'cancelled_manual')
                 self.event('cancelled_manual', target=friend['name'])
                 return True
-            if job['status'] == 'pending':
-                fresh = snapshot.refreshed(current, self.clock())
-                self.store.mark(job['id'], 'generating', snapshot=fresh)
-                try:
-                    reply = await self.request_reply(fresh)
-                    reply = validate_reply(' '.join(reply.splitlines())[:min(self.config.max_reply_chars - 5, 295)])
-                except Exception as exc:
-                    attempts = job['attempts'] + 1
-                    failed = attempts >= self.settings.get('max_model_attempts', 3)
-                    self.store.mark(job['id'], 'failed' if failed else 'pending', delay=min(60, 5 * 2 ** (attempts - 1)))
-                    self.event('model_failed' if failed else 'model_retry', target=friend['name'],
-                               attempts=attempts, reason=type(exc).__name__)
-                    return True
-                self.store.mark(job['id'], 'generated', reply=reply)
-                self.event('generated', target=friend['name'], job=job['id'])
-                job = self.store.job(job['id'])
-                snapshot = fresh
             if self.paused():
                 return False
             if self.config.dry_run:
@@ -130,6 +161,13 @@ class BrowserEngine:
                     if confirmed:
                         self.store.confirmed(job['id'], current)
                         self.sent += 1
+                        if self.memory is not None:
+                            try:
+                                await asyncio.to_thread(self.memory.confirmed, friend, job['reply'], current, snapshot=snapshot)
+                            except Exception as exc:
+                                # The receipt is already final. Memory failure must
+                                # never turn a confirmed send into another click.
+                                self.event('memory_unavailable', stage='confirmed_write', reason=type(exc).__name__)
                         self.event('visible_sent', target=friend['name'], stage='confirmed', job=job['id'])
                         return True
                 except Exception:
@@ -153,18 +191,40 @@ class BrowserEngine:
         failures = 0
         while not self.paused():
             try:
-                for friend in self.settings['whitelist']:
-                    async with self.ui_lock:
-                        await self.adapter.select(friend)
-                        messages = await self.adapter.read(friend)
-                    self.sample(friend, messages, reply_latest=first and self.settings.get('reply_latest', False))
+                successful = False
+                target_errors = False
+                for friend in active_targets(self.settings):
+                    stage = 'select'
+                    try:
+                        async with self.ui_lock:
+                            await self.adapter.select(friend)
+                            stage = 'read'
+                            messages = await self.adapter.read(friend)
+                        stage = 'ingest'
+                        self.sample(friend, messages, reply_latest=first and self.settings.get('reply_latest', False))
+                        successful = True
+                        self.manual_required = False
+                    except FriendNotFound:
+                        self.event('target_waiting', target=friend['name'], reason='conversation_not_visible')
+                        continue
+                    except ContinuityError as exc:
+                        # Keep this target's accepted cursor and continue polling
+                        # the remaining conversations in the same cycle.
+                        self.event('observation_waiting', target=friend['name'], reason=str(exc))
+                        continue
+                    except ManualActionRequired:
+                        raise
+                    except (BrowserUIError, DouyinPageError, PlaywrightError) as exc:
+                        target_errors = True
+                        self.event('target_retry', target=friend['name'], stage=stage, reason=type(exc).__name__)
+                        continue
+                if target_errors and not successful:
+                    raise BrowserUIError('all_targets_unavailable')
                 failures = 0
             except asyncio.CancelledError:
                 raise
-            except ContinuityError as exc:
-                # Preserve the accepted cursor rather than treating loaded history as new.
-                self.event('observation_waiting', reason=str(exc))
             except ManualActionRequired as exc:
+                self.manual_required = True
                 self.event('manual_action_required', reason=str(exc))
                 failures = 0
             except Exception as exc:
@@ -190,12 +250,16 @@ class BrowserEngine:
     async def dispatcher(self):
         while not self.paused():
             try:
-                worked = await self.step()
+                worked = await self.send_step()
             except asyncio.CancelledError:
                 raise
+            except ManualActionRequired as exc:
+                self.manual_required = True
+                self.event('manual_action_required', reason=str(exc))
+                worked = False
             except Exception as exc:
                 self.event('delivery_retry', reason=str(exc) if isinstance(exc, BrowserUIError) else type(exc).__name__)
-                job = self.store.next_job()
+                job = self.store.next_job('generated')
                 if job:
                     self.store.mark(job['id'], job['status'], delay=5)
                 worked = False
@@ -282,13 +346,14 @@ class PageAdapter:
         await asyncio.sleep(.15)
         if await self.draft() != reply:
             raise BrowserUIError('exact_draft_not_confirmed')
-        await self.session.chat.open_friend(friend, exact=True, current_only=True)
+        await self.session.verify_target(friend)
         snapshot.locate(await self.read(friend))
         button = await self.button()
         if not await button.is_enabled():
             raise BrowserUIError('send_button_disabled')
         if await self.draft() != reply:
             raise BrowserUIError('exact_draft_not_confirmed')
+        await require_no_verification(self.session.page)
         return PreparedSend(before, button)
 
     async def submit(self, friend, snapshot, reply, prepared):

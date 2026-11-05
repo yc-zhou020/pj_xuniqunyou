@@ -21,8 +21,8 @@ uv run --locked python -m playwright install --with-deps firefox
 首次配置时复制示例，已有文件不覆盖：
 
 ```bash
-cp -n browser.example.json browser.local.json
-cp -n config.example.json config.local.json
+cp -n config/examples/browser.json browser.local.json
+cp -n config/examples/reply.json config.local.json
 cp -n .env.example .env
 chmod 600 .env
 ```
@@ -43,7 +43,7 @@ chmod 600 .env
 在 Ubuntu 图形桌面的终端中运行：
 
 ```bash
-uv run --locked python run_friend.py --login
+uv run run_friend.py --login
 ```
 
 登录、验证码和身份绑定由用户操作。`--login` 总会打开可见浏览器；纯 SSH、无桌面或仅使用 Xvfb 不提供用户可直接操作的登录窗口，需要先通过实际桌面或远程桌面完成登录。登录后 `headless=true` 的日常运行不需要图形桌面或 Xvfb。
@@ -51,9 +51,9 @@ uv run --locked python run_friend.py --login
 先检查，再启动：
 
 ```bash
-uv run --locked python run_friend.py --status
-uv run --locked python run_friend.py --inspect
-uv run --locked python run_friend.py
+uv run run_friend.py --status
+uv run run_friend.py --inspect
+uv run run_friend.py
 ```
 
 `--inspect` 会读取真实白名单私聊但不调用模型、不发送。最后一条在回复配置 `dry_run=false` 时会自动回复，只在准备好正式运行后执行。
@@ -63,10 +63,10 @@ uv run --locked python run_friend.py
 ## 验证
 
 ```bash
-REQUIRE_BROWSER_TESTS=1 uv run --locked python -m unittest discover -s tests -v
+REQUIRE_BROWSER_TESTS=1 uv run scripts/run_tests.py
 uv lock --check --offline
 ```
 
-测试使用本地 HTML 和模拟模型，不需要 `.env` 或抖音登录。`REQUIRE_BROWSER_TESTS=1` 防止浏览器缺失时静默跳过集成测试。GitHub Actions 的 Ubuntu 24.04 任务也执行这些检查。
+测试使用本地 HTML 和模拟模型，不需要 `.env` 或抖音登录。`REQUIRE_BROWSER_TESTS=1` 防止浏览器缺失时静默跳过集成测试。
 
 安装说明参考 [Playwright 系统要求](https://playwright.dev/python/docs/intro)、[浏览器与系统依赖安装](https://playwright.dev/python/docs/browsers) 和 [uv 安装](https://docs.astral.sh/uv/getting-started/installation/)。

@@ -15,4 +15,5 @@ diagnostics/
 *.egg-info/
 build/
 dist/
+zip/*.zip
 example/
