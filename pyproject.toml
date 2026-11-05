@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "douyin-group-friend"
 version = "0.1.0"
-description = "DeepSeek group friend core and Windows UI diagnostics"
+description = "DeepSeek Firefox whitelist private-chat assistant"
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.64.1",

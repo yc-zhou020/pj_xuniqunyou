@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from .autonomous import InstanceLock
+from .runtime_support import InstanceLock
 from .browser_session import BrowserSession, load_settings
 
 

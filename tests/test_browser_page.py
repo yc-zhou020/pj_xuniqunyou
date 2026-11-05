@@ -41,13 +41,19 @@ document.querySelector('button').onclick=()=>{
 
 class FirefoxPageTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        binaries = Path('.playwright-browsers').resolve()
-        if not list(binaries.glob('firefox-*/firefox/firefox.exe')):
-            self.skipTest('Project Firefox not installed')
+        binaries = Path(os.environ.get('PLAYWRIGHT_BROWSERS_PATH', '.playwright-browsers')).resolve()
         self.env = os.environ.get('PLAYWRIGHT_BROWSERS_PATH')
         os.environ['PLAYWRIGHT_BROWSERS_PATH'] = str(binaries)
+        self.addCleanup(self.restore_browser_env)
         self.driver = await async_playwright().start()
+        self.addAsyncCleanup(self.driver.stop)
+        # Playwright resolves the executable for the current operating system.
+        if not Path(self.driver.firefox.executable_path).is_file():
+            if os.environ.get('REQUIRE_BROWSER_TESTS') == '1':
+                self.fail('Project Firefox not installed; browser tests are required')
+            self.skipTest('Project Firefox not installed')
         self.browser = await self.driver.firefox.launch(headless=True)
+        self.addAsyncCleanup(self.browser.close)
         self.page = await self.browser.new_page(viewport={'width':1200,'height':800})
         await self.page.set_content(HTML)
         self.session = BrowserSession({})
@@ -55,9 +61,7 @@ class FirefoxPageTests(unittest.IsolatedAsyncioTestCase):
         self.session.chat = DouyinChat(self.page, timeout_ms=1000)
         self.adapter = PageAdapter(self.session)
 
-    async def asyncTearDown(self):
-        await self.browser.close()
-        await self.driver.stop()
+    def restore_browser_env(self):
         if self.env is None:
             os.environ.pop('PLAYWRIGHT_BROWSERS_PATH', None)
         else:

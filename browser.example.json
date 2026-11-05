@@ -1,6 +1,6 @@
 {
   "backend": "browser",
-  "reply_config": "config.autonomous.local.json",
+  "reply_config": "config.local.json",
   "whitelist": [{"name": "Nefariousa", "douyin_id": "", "sec_uid": ""}],
   "profile_dir": "state/firefox-profile",
   "browser_path": ".playwright-browsers",

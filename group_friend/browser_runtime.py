@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import time
 
-from .autonomous import InstanceLock, make_logger
+from .runtime_support import InstanceLock, make_logger
 from .browser_engine import BrowserEngine, PageAdapter
 from .browser_session import BrowserSession, load_settings
 from .browser_setup import setup

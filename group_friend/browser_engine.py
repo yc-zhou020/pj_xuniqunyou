@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 from .conversation_snapshot import ChatMessage, ConversationSnapshot, ContinuityError, digest
-from .review import validate_reply
+from .runtime_support import validate_reply
 from .browser_errors import BrowserUIError, ManualActionRequired
 
 

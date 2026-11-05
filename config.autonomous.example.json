@@ -1,9 +1,0 @@
-{
-  "target_conversation": "private-desktop",
-  "self_identity": "local-ai",
-  "dry_run": true,
-  "memory_enabled": false,
-  "cooldown_seconds": 5,
-  "hourly_limit": 30,
-  "daily_limit": 100
-}

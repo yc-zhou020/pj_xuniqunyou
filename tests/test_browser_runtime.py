@@ -9,6 +9,7 @@ from group_friend.browser_engine import BrowserEngine
 from group_friend.browser_errors import BrowserUIError
 from group_friend.browser_state import BrowserState
 from group_friend.config import Config
+from group_friend.runtime_support import InstanceLock, ReplyError, validate_reply
 from group_friend.conversation_snapshot import ChatMessage, ConversationSnapshot, ContinuityError
 
 FRIEND = dict(name='Contact', douyin_id='account', sec_uid='native-participant')
@@ -353,7 +354,38 @@ class BrowserEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(self.status()), {'visible_sent'})
 
 
+class RuntimeSupportTests(unittest.TestCase):
+    def test_lock_excludes_another_runner_and_releases_after_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'runtime.lock'
+            with InstanceLock(path):
+                with self.assertRaisesRegex(ValueError, 'runtime_already_running'):
+                    with InstanceLock(path):
+                        self.fail('Second runner acquired the lock')
+            with InstanceLock(path):
+                pass
+
+    def test_reply_validation_preserves_label_and_rejects_multiline_or_oversize(self):
+        self.assertEqual(validate_reply(' reply '), '[AI] reply')
+        self.assertEqual(validate_reply('[AI] reply'), '[AI] reply')
+        for reply in ('', 'line\nbreak', 'x' * 300):
+            with self.subTest(reply=reply):
+                with self.assertRaises(ReplyError):
+                    validate_reply(reply)
+
+
 class BrowserPersistenceTests(unittest.TestCase):
+    def test_legacy_uncertain_receipts_still_block_browser_sends(self):
+        for table, column in (('auto_jobs', 'status'), ('replies', 'state')):
+            with self.subTest(table=table):
+                store = BrowserState(':memory:')
+                try:
+                    store.db.execute(f'CREATE TABLE {table} ({column} TEXT)')
+                    store.db.execute(f'INSERT INTO {table} VALUES (?)', ('unknown',))
+                    self.assertTrue(store.blocked())
+                finally:
+                    store.close()
+
     def test_checkpoint_and_pending_job_survive_restart_without_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'queue.sqlite3'
