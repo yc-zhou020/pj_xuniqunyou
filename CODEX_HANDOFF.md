@@ -1,5 +1,10 @@
 # DeepSeek 抖音私聊助手：开发交接
 
+## Firefox 窗口显示
+
+- 当前 `browser.local.json` 设置 `headless=false`，主程序正常运行时显示 Firefox 窗口；现有 BrowserSession 已支持该配置，无需额外启动参数。设为 `true` 可恢复无界面运行；修改配置后重新启动生效。
+- 显示窗口需要图形桌面环境。用户要求本次不做测试，未启动主程序、浏览器或任何测试。
+
 ## 当前路线
 
 - Python 直接调用 DeepSeek，Playwright/Firefox 操作抖音网页版，结构化文本快照；固定 5 秒采样、最小发送间隔 5 秒，不使用 Node 桥接。

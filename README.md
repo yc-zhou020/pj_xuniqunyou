@@ -13,7 +13,7 @@ uv run scripts/test_live_reply.py --install-browser
 uv run run_friend.py --login
 ```
 
-已有配置和登录资料不要覆盖。将 DeepSeek Key 填入本地 `.env`。登录、验证码和安全验证由用户手动完成；打开目标私聊并完成抖音号及 sec_uid 绑定后，常规运行使用无界面 Firefox。
+已有配置和登录资料不要覆盖。将 DeepSeek Key 填入本地 `.env`。登录、验证码和安全验证由用户手动完成；打开目标私聊并完成抖音号及 sec_uid 绑定后，即可启动主程序。Firefox 是否显示窗口由 `browser.local.json` 的 `headless` 控制：`false` 显示窗口，`true` 无界面运行。
 
 新环境默认 `dry_run=true`。日常真实回复使用 `--live`，只对本次运行启用发送，不改写本地配置；也可在回复配置中设置 `dry_run=false`。已有本地 `reply_config` 路径继续有效，无需重命名。
 
@@ -24,6 +24,8 @@ uv run run_friend.py --login
 ```bash
 uv run run_friend.py --live
 ```
+
+当前本地配置为 `"headless": false`，运行主程序时会显示 Firefox 窗口，可在窗口中手动完成安全验证。显示窗口需要图形桌面环境；无桌面的服务器可将其改为 `true`。修改后需重新启动主程序。
 
 回复正文最多 300 字符，不添加 `[AI]` 或其他自动身份前缀；直接询问身份时仍按 persona 如实回答。
 
